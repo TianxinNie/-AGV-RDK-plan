@@ -70,9 +70,9 @@ def pick_mestick(robot, logger) -> int:
                     logger.error(f"拍照失败，已重试 {max_retries} 次，放弃操作")
                     # 启动连续音频报警 - 拍照失败
                     alarm_manager = get_audio_alarm_manager()
-                    alarm_manager.start_continuous_alarm(3, "pick_photo_failed", interval=3.0, logger=logger)
+                    alarm_manager.start_continuous_alarm(3, "pick_photo_failed", interval=5.0, audio_duration=3.0, logger=logger)
                     return 101
-                logger.warning(f"拍照失败，进行第 {try_photo_num} 次重试")
+                logger.warn(f"拍照失败，进行第 {try_photo_num} 次重试")
                 continue
                 
             elif feedback == 102:  # 取料失败
@@ -80,9 +80,9 @@ def pick_mestick(robot, logger) -> int:
                     logger.error(f"取料失败，已重试 {max_retries} 次，放弃操作")
                     # 启动连续音频报警 - 取料失败
                     alarm_manager = get_audio_alarm_manager()
-                    alarm_manager.start_continuous_alarm(1, "pick_failed", interval=3.0, logger=logger)
+                    alarm_manager.start_continuous_alarm(1, "pick_failed", interval=6.0, audio_duration=4.0, logger=logger)
                     return 102
-                logger.warning(f"取料失败，进行第 {try_pick_num} 次重试")
+                logger.warn(f"取料失败，进行第 {try_pick_num} 次重试")
                 continue
                 
             elif feedback == 10:  # 成功

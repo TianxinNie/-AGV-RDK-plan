@@ -1,7 +1,7 @@
 from time import sleep
 from AGV import get_audio_alarm_manager
 
-def Put_mestick(robot, logger, WorkServerMestick: int,PalletNum:int=1) -> int:
+def Put_mestick(robot, logger, WorkServerMestick: int,PalletNum:int=1,PhotoNum:int=1) -> int:
     """
     执行放内存条操作，包含重试机制
     
@@ -52,7 +52,10 @@ def Put_mestick(robot, logger, WorkServerMestick: int,PalletNum:int=1) -> int:
 
                 robot.SetGlobalVariables({"PalletNum": PalletNum})
                 logger.info(f"设置PalletNum = {PalletNum}")
-                
+
+                robot.SetGlobalVariables({"PhotoNum": PhotoNum})
+                logger.info(f"设置PhotoNum = {PhotoNum}")
+
                 # 执行计划
                 logger.info("开始执行PutMestick计划...")
                 robot.ExecutePlan("PutMestick", True)
@@ -79,7 +82,7 @@ def Put_mestick(robot, logger, WorkServerMestick: int,PalletNum:int=1) -> int:
                     logger.error(f"拍照失败，已重试 {max_retries} 次，放弃操作")
                     # 启动连续音频报警 - 拍照失败
                     alarm_manager = get_audio_alarm_manager()
-                    alarm_manager.start_continuous_alarm(3, "put_photo_failed", interval=3.0, logger=logger)
+                    alarm_manager.start_continuous_alarm(3, "put_photo_failed", interval=5.0, audio_duration=3.0, logger=logger)
                     return 201
                 logger.warning(f"拍照失败，进行第 {try_photo_num} 次重试")
                 continue
@@ -88,7 +91,7 @@ def Put_mestick(robot, logger, WorkServerMestick: int,PalletNum:int=1) -> int:
                 logger.error("放内存条失败，放弃操作")
                 # 启动连续音频报警 - 放料失败
                 alarm_manager = get_audio_alarm_manager()
-                alarm_manager.start_continuous_alarm(2, "put_failed", interval=3.0, logger=logger)
+                alarm_manager.start_continuous_alarm(2, "put_failed", interval=6.0, audio_duration=4.0, logger=logger)
                 return 202
                 
             elif feedback == 203:  # 未放过料无法取料

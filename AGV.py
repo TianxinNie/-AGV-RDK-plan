@@ -140,14 +140,15 @@ class AudioAlarmManager:
         self.alarm_events = {}   # {alarm_id: stop_event}
         self.is_running = {}     # {alarm_id: is_running}
         
-    def start_continuous_alarm(self, audio_id, alarm_id=None, interval=3.0, logger=None):
+    def start_continuous_alarm(self, audio_id, alarm_id=None, interval=5.0, audio_duration=3.0, logger=None):
         """
         开始连续音频报警
         
         Args:
             audio_id: 音频文件编号
             alarm_id: 报警标识符（默认使用audio_id）
-            interval: 播放间隔时间（秒）
+            interval: 两次播放之间的静默间隔时间（秒），默认5秒
+            audio_duration: 预估音频播放时长（秒），默认3秒
             logger: 日志记录器
             
         Returns:
@@ -174,16 +175,22 @@ class AudioAlarmManager:
         
         def alarm_loop():
             """报警循环线程"""
-            log(f"开始连续音频报警: {alarm_id}, 音频ID: {audio_id}, 间隔: {interval}s")
+            log(f"开始连续音频报警: {alarm_id}, 音频ID: {audio_id}, 音频时长: {audio_duration}s, 静默间隔: {interval}s")
             
             while not stop_event.is_set():
                 try:
                     # 使用全局连接播放音频
+                    log(f"播放音频 {audio_id}...")
                     success = simple_play_audio(audio_id, logger)
                     if not success:
                         log(f"音频播放失败: {audio_id}", "warning")
                     
-                    # 等待指定间隔时间，或收到停止信号
+                    # 等待音频播放完成
+                    if stop_event.wait(timeout=audio_duration):
+                        break  # 收到停止信号
+                    
+                    # 音频播放完成后，等待静默间隔
+                    log(f"音频播放完成，等待 {interval}s 后播放下一次...")
                     if stop_event.wait(timeout=interval):
                         break  # 收到停止信号
                         
@@ -468,6 +475,7 @@ def confirm_localization(client):
     else:
         print(f"[ERROR] 读取定位状态失败: {res}")
         return False
+
 
 def check_block_status(client):
     """检查AGV阻挡状态"""
@@ -1116,6 +1124,171 @@ def play_audio(client, audio_id, logger=None):
         log(f"播放音频异常: {e}", "error")
         return False
 
+def get_current_station(client):
+    """获取AGV当前所在站点"""
+    try:
+        res = client.read_input_registers(address=INPUT_CURRENT_STATION, count=1)
+        if not res.isError():
+            raw_value = res.registers[0]
+            print(f"[DEBUG] AGV原始寄存器值: {raw_value}")
+            
+            # 定义有效站点列表
+            valid_stations = [4, 5, 6, 7]
+            
+            # 站点有效性检查
+            if raw_value == 0:
+                print("[INFO] AGV报告站点0，表示不在任何站点")
+                return None
+            elif raw_value in valid_stations:
+                print(f"[INFO] AGV在有效站点: {raw_value}")
+                return raw_value
+            else:
+                print(f"[WARNING] AGV报告未知站点ID: {raw_value}，视为不在有效站点")
+                print(f"[DEBUG] 有效站点列表: {valid_stations}")
+                return None  # 将未知站点ID当作不在任何站点处理
+        else:
+            print(f"[ERROR] 读取当前站点失败: {res}")
+            return None
+    except Exception as e:
+        print(f"[ERROR] 获取当前站点异常: {e}")
+        return None
+
+def initialize_agv_to_station4(logger=None):
+    """
+    初始化AGV到站点4
+    
+    根据当前位置执行不同的移动策略：
+    - 站点4: 无需移动
+    - 站点5: 直接移动至站点4
+    - 站点6: 先移动至站点7，再移动至站点4  
+    - 站点7: 直接移动至站点4
+    - 其他站点: 直接尝试移动至站点4
+    
+    Args:
+        logger: 日志记录器（可选）
+        
+    Returns:
+        bool: True-成功到达站点4，False-失败
+    """
+    def log(msg, level="info"):
+        if logger:
+            getattr(logger, level)(msg)
+        else:
+            print(f"[AGV_INIT] {msg}")
+    
+    try:
+        log("开始AGV初始化，目标站点4")
+        
+        # 使用全局连接管理器
+        global_conn = get_agv_connection()
+        client = global_conn.get_client()
+        
+        if not client:
+            log("AGV全局连接不可用", "error")
+            return False
+        
+        # 获取当前站点
+        current_station = get_current_station(client)
+        if current_station is None:
+            log("无法获取AGV当前站点，AGV可能处于未定位状态", "error")
+            log("开始循环播放音频文件6提醒操作员", "warn")
+            
+            # 获取音频报警管理器
+            alarm_manager = get_audio_alarm_manager()
+            
+            # 启动连续音频报警
+            alarm_manager.start_continuous_alarm(
+                audio_id=6,
+                alarm_id="agv_unknown_position",
+                interval=3.0,  # 每3秒播放一次
+                audio_duration=2.0,  # 音频时长2秒
+                logger=logger
+            )
+            
+            log("已启动音频报警，请操作员检查AGV位置并重新定位", "error")
+            return False
+        
+        # 根据当前站点执行不同策略
+        if current_station == 4:
+            log("✅ AGV已在站点4，无需移动")
+            return True
+            
+        elif current_station == 5:
+            log("AGV在站点5，直接移动至站点4")
+            success = move_agv_to_station(4, logger)
+            if success:
+                log("✅ AGV成功从站点5移动到站点4")
+                return True
+            else:
+                log("❌ AGV从站点5移动到站点4失败", "error")
+                return False
+                
+        elif current_station == 6:
+            log("AGV在站点6，需要先移动至站点7，再移动至站点4")
+            
+            # 第一步：移动到站点7
+            log("第一步：从站点6移动到站点7")
+            success = move_agv_to_station(7, logger)
+            if not success:
+                log("❌ AGV从站点6移动到站点7失败", "error")
+                return False
+            log("✅ AGV成功从站点6移动到站点7")
+            
+            # 第二步：移动到站点4
+            log("第二步：从站点7移动到站点4")
+            success = move_agv_to_station(4, logger)
+            if success:
+                log("✅ AGV成功从站点7移动到站点4，初始化完成")
+                return True
+            else:
+                log("❌ AGV从站点7移动到站点4失败", "error")
+                return False
+                
+        elif current_station == 7:
+            log("AGV在站点7，直接移动至站点4")
+            success = move_agv_to_station(4, logger)
+            if success:
+                log("✅ AGV成功从站点7移动到站点4")
+                return True
+            else:
+                log("❌ AGV从站点7移动到站点4失败", "error")
+                return False
+                
+        else:
+            log(f"AGV在未知站点{current_station}，开始循环播放音频文件6提醒操作员", "warn")
+            
+            # 获取音频报警管理器
+            alarm_manager = get_audio_alarm_manager()
+            
+            # 启动连续音频报警
+            alarm_manager.start_continuous_alarm(
+                audio_id=6,
+                alarm_id="agv_unknown_station",
+                interval=3.0,  # 每3秒播放一次
+                audio_duration=2.0,  # 音频时长2秒
+                logger=logger
+            )
+            
+            log(f"AGV在未识别的站点{current_station}，已启动音频报警", "error")
+            log("请操作员检查AGV位置，手动移动AGV到已知站点", "error")
+            return False
+                
+    except Exception as e:
+        log(f"AGV初始化异常: {e}", "error")
+        return False
+
+def simple_initialize_agv(logger=None):
+    """
+    简化的AGV初始化函数 - 别名函数，方便调用
+    
+    Args:
+        logger: 日志记录器（可选）
+        
+    Returns:
+        bool: True-成功，False-失败
+    """
+    return initialize_agv_to_station4(logger)
+
 def simple_play_audio(audio_id, logger=None):
     """
     简化的AGV音频播放函数 - 使用全局连接，无需每次建立连接
@@ -1159,8 +1332,8 @@ if __name__ == '__main__':
     print("[INFO] 开始连接AGV...")
     print(f"[DEBUG] 目标IP: {MODBUS_IP}, 端口: {MODBUS_PORT}")
     
-    # 音频播放示例
-    print("\n=== AGV音频播放示例 ===")
+    # 音频播放示例 - 测试新的间隔逻辑
+    print("\n=== AGV音频播放示例（改进版） ===")
     
     # 方法1: 使用简化函数
     print("方法1: 使用简化函数播放音频")
@@ -1170,8 +1343,34 @@ if __name__ == '__main__':
     else:
         print("❌ 音频1播放失败")
     
-    # 方法2: 使用AGVController类
-    print("\n方法2: 使用AGVController类播放音频")
+    # 方法2: 测试连续音频播放（改进的间隔逻辑）
+    print("\n方法2: 测试连续音频播放（改进的间隔逻辑）")
+    try:
+        alarm_manager = get_audio_alarm_manager()
+        
+        # 启动连续音频报警，指定音频时长和静默间隔
+        alarm_id = alarm_manager.start_continuous_alarm(
+            audio_id=1,              # 音频文件编号
+            alarm_id="test_alarm",   # 报警标识符
+            interval=5.0,            # 静默间隔5秒
+            audio_duration=3.0       # 音频播放时长3秒
+        )
+        
+        print(f"✅ 连续音频报警已启动: {alarm_id}")
+        print("播放逻辑: 播放3秒音频 → 等待5秒静默 → 重复")
+        
+        # 运行10秒后停止
+        import time
+        time.sleep(10)
+        
+        success = alarm_manager.stop_alarm(alarm_id)
+        if success:
+            print("✅ 连续音频报警已停止")
+    except Exception as e:
+        print(f"❌ 连续音频播放测试失败: {e}")
+    
+    # 方法3: 使用AGVController类播放音频
+    print("\n方法3: 使用AGVController类播放音频")
     try:
         with AGVController() as agv:
             success = agv.play_audio(2)
@@ -1182,29 +1381,9 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"❌ AGVController音频播放失败: {e}")
     
-    # 方法3: 手动连接播放音频
-    print("\n方法3: 手动连接播放音频")
-    client = ModbusTcpClient(MODBUS_IP, port=MODBUS_PORT)
-    if client.connect():
-        print(f"[SUCCESS] 成功连接到AGV - {MODBUS_IP}:{MODBUS_PORT}")
-        
-        # 播放多个音频文件
-        audio_files = [1, 2, 3]
-        for audio_id in audio_files:
-            print(f"\n播放音频 {audio_id}:")
-            success = play_audio(client, audio_id)
-            if success:
-                print(f"✅ 音频 {audio_id} 播放成功")
-            else:
-                print(f"❌ 音频 {audio_id} 播放失败")
-            time.sleep(1)  # 间隔1秒
-        
-        client.close()
-    else:
-        print(f"[ERROR] 连接失败 - IP: {MODBUS_IP}:{MODBUS_PORT}")
-        print("[INFO] 请检查:")
-        print("1. AGV设备是否开机")
-        print("2. 网络连接是否正常")
-        print("3. IP地址和端口是否正确")
-    
     print("\n[INFO] 音频播放示例结束")
+    print("改进说明:")
+    print("- 连续播放现在会等待音频播放完成后再等待静默间隔")
+    print("- 默认音频时长3秒，静默间隔5秒")
+    print("- 可以根据实际音频文件长度调整参数")
+    print("- 避免了音频重叠播放的问题")

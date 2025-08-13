@@ -13,9 +13,9 @@ from plans.change_tool import change_tool
 from plans.pick_mestick import pick_mestick
 from plans.Put_mestick import Put_mestick  
 from utils.logger import get_logger
-from AGV import move_agv_to_station, get_audio_alarm_manager
+from AGV import move_agv_to_station, get_audio_alarm_manager, simple_initialize_agv, get_current_station, get_agv_connection  
 
-def memory_stick_workflow(robot, logger, tool_num=1, check_mestick=False, agv_enabled=True, work_station=4):
+def memory_stick_workflow(robot, logger, tool_num=1, check_mestick=True, agv_enabled=True, work_station=4):
     """
     内存条操作工作流程
     
@@ -44,19 +44,6 @@ def memory_stick_workflow(robot, logger, tool_num=1, check_mestick=False, agv_en
         logger.error("换工具操作失败，程序终止")
         return 1
     
-    # AGV移动到工作站点（换工具完成后）
-    if agv_enabled:
-        logger.info(f"AGV开始移动到工作站点 {work_station}...")
-        try:
-            success = move_agv_to_station(work_station, logger)
-            if success:
-                logger.info("AGV已成功到达工作站点")
-            else:
-                logger.warning("AGV移动失败，但程序将继续执行")
-        except Exception as e:
-            logger.error(f"AGV移动过程中发生异常: {e}")
-            logger.warning("AGV操作失败，但程序将继续执行")
- 
     # 执行取内存条操作
     logger.info("开始执行取内存条流程...")
     if not handle_work_step(
@@ -69,10 +56,44 @@ def memory_stick_workflow(robot, logger, tool_num=1, check_mestick=False, agv_en
         logger.error("取内存条操作失败，程序终止")
         return 1
     
+    # 在执行放内存条之前，AGV移动到站点5（做连接检测）
+    if agv_enabled:
+        logger.info("准备执行放内存条操作，AGV移动到站点5进行连接检测...")
+        try:
+            # 获取AGV全局连接
+            global_conn = get_agv_connection()
+            client = global_conn.get_client()
+            
+            if client:
+                # 检查当前站点
+                current_station = get_current_station(client)
+                logger.info(f"AGV当前站点: {current_station}")
+                
+                if current_station == 5:
+                    logger.info("✅ AGV已在站点5，无需移动")
+                else:
+                    logger.info(f"AGV需要从站点 {current_station} 移动到站点5")
+                    success = move_agv_to_station(5, logger)
+                    if success:
+                        logger.info("AGV已成功到达站点5，准备执行放内存条操作")
+                    else:
+                        logger.warn("AGV移动到站点5失败，但程序将继续执行")
+            else:
+                logger.warn("无法获取AGV连接，跳过站点检查，直接尝试移动到站点5")
+                success = move_agv_to_station(5, logger)
+                if success:
+                    logger.info("AGV已成功到达站点5，准备执行放内存条操作")
+                else:
+                    logger.warn("AGV移动到站点5失败，但程序将继续执行")
+                    
+        except Exception as e:
+            logger.error(f"AGV移动到站点5过程中发生异常: {e}")
+            logger.warn("AGV移动失败，但程序将继续执行")
+    
     # 执行放内存条操作
     logger.info("开始执行放内存条流程...")
     try:
-        result = Put_mestick(robot, logger, WorkServerMestick=1)
+        result = Put_mestick(robot, logger, WorkServerMestick=1, PalletNum=1, PhotoNum=1)
         if result == 20:  # 成功
             logger.info("放内存条操作成功")
         else:
@@ -97,6 +118,32 @@ def memory_stick_workflow(robot, logger, tool_num=1, check_mestick=False, agv_en
 
     logger.info("内存条工作流程完成！")
     return 0
+
+
+def initialize_agv_system(logger):
+    """
+    初始化AGV系统，确保AGV位于站点4
+    
+    Args:
+        logger: 日志记录器
+        
+    Returns:
+        bool: True-初始化成功，False-初始化失败
+    """
+    logger.info("开始AGV初始化，确保AGV位于站点4...")
+    try:
+        init_success = simple_initialize_agv(logger)
+        if init_success:
+            logger.info("✅ AGV初始化成功，已确保AGV位于站点4")
+            return True
+        else:
+            logger.warn("⚠️ AGV初始化失败，但程序将继续执行")
+            logger.warn("建议检查AGV状态和网络连接")
+            return False
+    except Exception as e:
+        logger.error(f"AGV初始化过程中发生异常: {e}")
+        logger.warn("AGV初始化失败，但程序将继续执行")
+        return False
 
 
 def main():
@@ -129,12 +176,37 @@ def main():
         if stopped_count > 0:
             logger.info(f"已停止 {stopped_count} 个连续音频报警")
     except Exception as e:
-        logger.warning(f"停止音频报警时发生异常: {e}")
+        logger.warn(f"停止音频报警时发生异常: {e}")
     
     # AGV默认启用，除非明确禁用
     agv_enabled = not args.disable_agv
     if agv_enabled:
         logger.info(f"AGV控制已启用 - 工作站点: {args.work_station}")
+        
+        # AGV初始化函数调用
+        agv_init_success = initialize_agv_system(logger)
+        if not agv_init_success:
+            logger.error("AGV初始化失败，程序终止")
+            logger.error("请确保AGV在有效站点(4、5、6、7)后重新运行程序")
+            logger.info("音频报警将持续播放，按Ctrl+C可停止")
+            
+            # 等待用户手动停止，保持音频报警运行
+            try:
+                while True:
+                    import time
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                logger.info("用户手动停止程序")
+                # 停止所有音频报警
+                try:
+                    from AGV import get_audio_alarm_manager
+                    alarm_manager = get_audio_alarm_manager()
+                    stopped_count = alarm_manager.stop_all_alarms()
+                    if stopped_count > 0:
+                        logger.info(f"已停止 {stopped_count} 个音频报警")
+                except Exception as e:
+                    logger.warn(f"停止音频报警时发生异常: {e}")
+                return 5  # AGV初始化失败退出码
     else:
         logger.info("AGV控制已禁用")
 
@@ -148,22 +220,54 @@ def main():
             logger.info("检查机器人连接状态...")
             robot_mode = robot.mode()
             logger.info(f"机器人当前模式: {robot_mode}")
+            
+            # 等待机器人完全就绪
+            import time
+            logger.info("等待机器人完全就绪...")
+            time.sleep(2)  # 给机器人一些时间完成初始化
+            
         except Exception as e:
             logger.error(f"无法获取机器人状态: {e}")
             logger.error("机器人可能未正确连接，请检查:")
             logger.error("1. 机器人是否开机")
             logger.error("2. 网络连接是否正常")
             logger.error("3. 机器人序列号是否正确")
+            logger.error("4. 机器人是否完成启动过程")
             return 3
 
-        # 显示可用计划列表
-        try:
-            plan_list = robot.plan_list()
-            logger.info("可用计划列表:")
-            for i in range(len(plan_list)):
-                logger.info(f"[{i}] {plan_list[i]}")
+        # 显示可用计划列表（带重试机制）
+        max_retries = 3
+        plan_list = None
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"获取计划列表 (第{attempt + 1}次尝试)...")
+                plan_list = robot.plan_list()
+                logger.info("成功获取计划列表:")
+                for i in range(len(plan_list)):
+                    logger.info(f"[{i}] {plan_list[i]}")
+                break  # 成功获取，跳出重试循环
                 
-            # 检查必需的计划是否存在
+            except Exception as e:
+                logger.warn(f"第{attempt + 1}次获取计划列表失败: {e}")
+                if attempt < max_retries - 1:
+                    logger.info("等待3秒后重试...")
+                    time.sleep(3)
+                else:
+                    logger.error("多次尝试后仍无法获取计划列表")
+                    logger.error("可能的原因:")
+                    logger.error("1. 机器人仍在启动过程中")
+                    logger.error("2. 机器人RDK服务未正常运行")
+                    logger.error("3. 机器人处于错误状态")
+                    logger.error("4. 机器人计划管理器未就绪")
+                    logger.error("建议:")
+                    logger.error("- 检查机器人控制器状态")
+                    logger.error("- 重启机器人RDK服务")
+                    logger.error("- 确认机器人完全启动完成")
+                    return 3
+        
+        # 检查必需的计划是否存在
+        if plan_list is not None:
             required_plans = ["ChangeTool", "PickMestick", "PutMestick"]
             missing_plans = []
             for plan in required_plans:
@@ -174,18 +278,15 @@ def main():
                 logger.error(f"缺少必需的计划: {missing_plans}")
                 logger.error("请确保机器人中包含所有必需的计划")
                 return 4
-                
-        except Exception as e:
-            logger.error(f"无法获取计划列表: {e}")
-            logger.error("这通常表示机器人通信有问题")
-            return 3
+
+       
 
         # 执行内存条工作流程（包含AGV移动）
         result = memory_stick_workflow(
             robot, 
             logger, 
             tool_num=args.tool_num,
-            check_mestick=args.check_mestick,
+            check_mestick=True,
             agv_enabled=agv_enabled,
             work_station=args.work_station
         )
@@ -198,7 +299,7 @@ def main():
         return result
         
     except KeyboardInterrupt:
-        logger.warning("程序被用户中断")
+        logger.warn("程序被用户中断")
         return 2
         
     except Exception as e:

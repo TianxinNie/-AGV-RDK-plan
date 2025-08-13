@@ -23,7 +23,7 @@ def change_tool(robot, logger, work_num: int = 1) -> int:
             logger.error(f"无法获取机器人状态: {e}")
             # 启动连续音频报警 - 机器人状态错误
             alarm_manager = get_audio_alarm_manager()
-            alarm_manager.start_continuous_alarm(4, "robot_status_error", interval=3.0, logger=logger)
+            alarm_manager.start_continuous_alarm(4, "robot_status_error", interval=5.0, audio_duration=4.0, logger=logger)
             return 1999
         
         # 检查ChangeTool计划是否存在
@@ -65,7 +65,7 @@ def change_tool(robot, logger, work_num: int = 1) -> int:
                 logger.error(f"换工具操作失败，错误码: {feedback}")
                 # 启动连续音频报警 - 机器人状态错误（换工具失败通常是机器人状态问题）
                 alarm_manager = get_audio_alarm_manager()
-                alarm_manager.start_continuous_alarm(4, "change_tool_failed", interval=3.0, logger=logger)
+                alarm_manager.start_continuous_alarm(4, "change_tool_failed", interval=5.0, audio_duration=4.0, logger=logger)
                 
             return feedback
             
