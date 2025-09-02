@@ -26,7 +26,7 @@ ADDR_PLAY_AUDIO = 29           # 播放音频 (00030-1)
 INPUT_ROBOT_X = 0              # 机器人X坐标 (00001-1)
 INPUT_ROBOT_Y = 2              # 机器人Y坐标 (00003-1)
 INPUT_ROBOT_ANGLE = 4          # 机器人角度 (00005-1)
-INPUT_CURRENT_STATION = 6      # 当前导航站点 (00007-1)
+INPUT_CURRENT_STATION = 33     # 当前所在站点 (00034-1) - 机器人实际物理位置
 INPUT_LOCALIZATION_STATE = 7   # 定位状态 (00008-1)
 INPUT_NAVIGATION_STATE = 8     # 导航状态 (00009-1)
 INPUT_FATAL_ERROR = 30         # Fatal错误码 (00031-1)
@@ -511,6 +511,148 @@ def check_block_status(client):
         print(f"[ERROR] 检查阻挡状态异常: {e}")
         return None, None
 
+def print_detailed_sensor_status(client):
+    """打印详细的传感器和系统状态信息"""
+    print("\n📊 === AGV详细传感器状态 ===")
+    
+    try:
+        # 1. 阻挡传感器详细信息
+        print("🚧 阻挡传感器状态:")
+        block_res = client.read_input_registers(address=INPUT_IS_BLOCKED, count=1)
+        reason_res = client.read_input_registers(address=INPUT_BLOCK_REASON, count=1)
+        
+        if not block_res.isError():
+            is_blocked = block_res.registers[0]
+            print(f"  · 阻挡状态: {'🔴 被阻挡' if is_blocked else '🟢 未阻挡'} ({is_blocked})")
+            
+            if is_blocked and not reason_res.isError():
+                block_reason = reason_res.registers[0]
+                reason_map = {
+                    0: "超声传感器", 1: "激光传感器", 2: "防跌落传感器",
+                    3: "碰撞传感器", 4: "红外传感器", 5: "锁车开关",
+                    6: "动态障碍物", 7: "虚拟激光点", 8: "3D相机",
+                    9: "距离传感器", 10: "DI超声"
+                }
+                reason_desc = reason_map.get(block_reason, f"未知({block_reason})")
+                print(f"  · 触发传感器: 🚨 {reason_desc} (代码:{block_reason})")
+                
+                # 根据阻挡原因读取更详细信息
+                if block_reason == 0:  # 超声传感器
+                    ultrasonic_id_res = client.read_input_registers(address=44, count=1)
+                    if not ultrasonic_id_res.isError():
+                        ultrasonic_id = ultrasonic_id_res.registers[0]
+                        print(f"  · 超声传感器ID: {ultrasonic_id}")
+                        
+                elif block_reason in [2, 3, 4]:  # 防跌落、碰撞、红外传感器
+                    di_id_res = client.read_input_registers(address=45, count=1)
+                    if not di_id_res.isError():
+                        di_id = di_id_res.registers[0]
+                        print(f"  · DI传感器ID: {di_id}")
+                
+                # 读取阻挡位置坐标
+                block_pos_res = client.read_input_registers(address=46, count=4)
+                if not block_pos_res.isError() and len(block_pos_res.registers) >= 4:
+                    try:
+                        import struct
+                        x_bytes = struct.pack('>HH', block_pos_res.registers[0], block_pos_res.registers[1])
+                        y_bytes = struct.pack('>HH', block_pos_res.registers[2], block_pos_res.registers[3])
+                        block_x = struct.unpack('>f', x_bytes)[0]
+                        block_y = struct.unpack('>f', y_bytes)[0]
+                        print(f"  · 阻挡位置: X={block_x:.3f}m, Y={block_y:.3f}m")
+                    except:
+                        pass
+        
+        # 2. 减速传感器状态
+        print("\n🐌 减速传感器状态:")
+        slow_res = client.read_coils(address=0, count=1)
+        if not slow_res.isError():
+            is_slowing = slow_res.bits[0]
+            print(f"  · 减速状态: {'🟡 减速中' if is_slowing else '🟢 正常'} ({int(is_slowing)})")
+            
+            if is_slowing:
+                slow_reason_res = client.read_input_registers(address=83, count=1)
+                if not slow_reason_res.isError():
+                    slow_reason = slow_reason_res.registers[0]
+                    slow_reason_map = {
+                        0: "超声传感器", 1: "激光传感器", 2: "防跌落传感器",
+                        3: "碰撞传感器", 4: "红外传感器", 5: "锁车开关",
+                        6: "动态障碍物", 7: "虚拟激光点", 8: "3D相机",
+                        9: "距离传感器", 10: "DI超声"
+                    }
+                    slow_desc = slow_reason_map.get(slow_reason, f"未知({slow_reason})")
+                    print(f"  · 减速原因: 🟡 {slow_desc} (代码:{slow_reason})")
+        
+        # 3. 安全状态检查
+        print("\n🛡️ 安全状态检查:")
+        safety_res = client.read_coils(address=2, count=5)
+        if not safety_res.isError():
+            safety_states = [
+                ("充电状态", "🔋 充电中" if safety_res.bits[0] else "⚡ 未充电"),
+                ("急停状态", "🚨 急停" if safety_res.bits[1] else "✅ 正常"),
+                ("抱闸状态", "🔒 抱闸" if safety_res.bits[2] else "🔓 未抱闸"),
+                ("货叉到位", "📦 到位" if safety_res.bits[3] else "📦 未到位"),
+                ("控制模式", "🤖 自动" if safety_res.bits[4] else "👨 手动")
+            ]
+            for desc, status in safety_states:
+                print(f"  · {desc}: {status}")
+        
+        # 4. DI传感器状态 (前16个)
+        print("\n🔌 DI传感器状态 (DI0-DI15):")
+        di_res = client.read_coils(address=19, count=16)
+        if not di_res.isError():
+            for i in range(16):
+                state = "🟢 HIGH" if di_res.bits[i] else "🔴 LOW"
+                print(f"  · DI{i:2d}: {state}")
+        
+        # 5. 系统状态详情
+        print("\n⚠️ 系统状态:")
+        system_res = client.read_coils(address=7, count=4)
+        if not system_res.isError():
+            has_fatal = system_res.bits[0]
+            has_error = system_res.bits[1] 
+            has_warning = system_res.bits[2]
+            lift_enabled = system_res.bits[3] if len(system_res.bits) > 3 else False
+            
+            print(f"  · Fatal错误: {'🚨 有' if has_fatal else '✅ 无'}")
+            print(f"  · Error错误: {'⚠️ 有' if has_error else '✅ 无'}")
+            print(f"  · Warning警告: {'🟡 有' if has_warning else '✅ 无'}")
+            print(f"  · 顶升启用: {'📤 启用' if lift_enabled else '📥 未启用'}")
+        
+        # 6. 机器人运动状态
+        print("\n🤖 运动状态:")
+        motion_res = client.read_coils(address=16, count=3)
+        if not motion_res.isError():
+            is_loaded = motion_res.bits[0] if len(motion_res.bits) > 0 else False
+            is_static = motion_res.bits[2] if len(motion_res.bits) > 2 else False
+            
+            print(f"  · 载货状态: {'📦 载货中' if is_loaded else '📭 空载'}")
+            print(f"  · 运动状态: {'🛑 静止' if is_static else '🏃 运动中'}")
+        
+        # 7. 速度状态
+        print("\n📏 当前速度:")
+        speed_res = client.read_input_registers(address=50, count=6)
+        if not speed_res.isError() and len(speed_res.registers) >= 6:
+            try:
+                import struct
+                vx_bytes = struct.pack('>HH', speed_res.registers[0], speed_res.registers[1])
+                vy_bytes = struct.pack('>HH', speed_res.registers[2], speed_res.registers[3])
+                w_bytes = struct.pack('>HH', speed_res.registers[4], speed_res.registers[5])
+                
+                vx = struct.unpack('>f', vx_bytes)[0]
+                vy = struct.unpack('>f', vy_bytes)[0] 
+                w = struct.unpack('>f', w_bytes)[0]
+                
+                print(f"  · VX速度: {vx:+.3f} m/s")
+                print(f"  · VY速度: {vy:+.3f} m/s") 
+                print(f"  · 角速度: {w:+.3f} rad/s")
+            except:
+                print("  · 速度信息解析失败")
+                
+    except Exception as e:
+        print(f"❌ 读取传感器状态时发生异常: {e}")
+    
+    print("=" * 50)
+
 def diagnose_navigation_failure(client, nav_status):
     """诊断导航失败的具体原因"""
     print(f"\n🔍 诊断导航失败原因 (状态码={nav_status})...")
@@ -553,7 +695,7 @@ def diagnose_navigation_failure(client, nav_status):
     except Exception as e:
         print(f"⚠️ 错误码读取异常: {e}")
 
-def monitor_navigation_with_block_handling(client, max_total_time=300, max_continuous_block_time=60):
+def monitor_navigation_with_block_handling(client, max_total_time=300, max_continuous_block_time=60, wait_forever_on_block=False):
     """
     智能导航监控，处理阻挡等待
     
@@ -561,6 +703,7 @@ def monitor_navigation_with_block_handling(client, max_total_time=300, max_conti
         client: Modbus客户端
         max_total_time: 总超时时间(秒)，默认5分钟
         max_continuous_block_time: 连续阻挡最大等待时间(秒)，默认1分钟
+        wait_forever_on_block: 是否无限等待障碍物消失，默认False
     
     Returns:
         bool: 导航是否成功
@@ -619,16 +762,21 @@ def monitor_navigation_with_block_handling(client, max_total_time=300, max_conti
             if block_start_time is None:
                 block_start_time = current_time
                 print(f"🚧 [第{attempt}次] AGV被阻挡: {block_reason}，开始等待...")
+                # 打印详细传感器状态
+                print_detailed_sensor_status(client)
             else:
                 block_duration = current_time - block_start_time
                 total_block_time += 1
                 
                 # 检查是否连续阻挡时间过长
-                if block_duration > max_continuous_block_time:
+                if not wait_forever_on_block and block_duration > max_continuous_block_time:
                     print(f"⏰ AGV连续阻挡时间过长({block_duration:.1f}秒)，可能需要人工干预")
                     return False
                     
-                print(f"🚧 [第{attempt}次] 仍被阻挡: {block_reason} (已等待{block_duration:.1f}s)")
+                status_msg = f"🚧 [第{attempt}次] 仍被阻挡: {block_reason} (已等待{block_duration:.1f}s)"
+                if wait_forever_on_block:
+                    status_msg += " [无限等待模式]"
+                print(status_msg)
         else:  # 未阻挡
             if block_start_time is not None:
                 block_duration = current_time - block_start_time
@@ -779,8 +927,21 @@ def release_control(client):
     print("❌ 释放控制权超时")
     return False
 
-def move_to_station(client, station_id, vx=1.0, vy=0.0, w=0.5):
-    """控制AGV移动到指定站点"""
+def move_to_station(client, station_id, vx=1.0, vy=0.0, w=0.5, wait_forever_on_block=True):
+    """
+    控制AGV移动到指定站点
+    
+    Args:
+        client: Modbus客户端
+        station_id: 目标站点号
+        vx: VX速度，默认1.0，范围(0, 3.0]
+        vy: VY速度，默认0.0，范围[-3.0, 3.0]
+        w: 角速度，默认0.5，范围[0, 3.0]
+        wait_forever_on_block: 遇到障碍物时是否无限等待，默认True
+        
+    Returns:
+        bool: 是否成功到达目标站点
+    """
     print(f"[INFO] 开始移动到站点 {station_id}, 速度参数: VX={vx}, VY={vy}, W={w}")
     
     # 参数验证
@@ -831,7 +992,7 @@ def move_to_station(client, station_id, vx=1.0, vy=0.0, w=0.5):
     print("[INFO] 机器人开始路径导航，使用智能阻挡处理...")
     
     # 使用新的智能导航监控（支持阻挡等待）
-    return monitor_navigation_with_block_handling(client, max_total_time=300, max_continuous_block_time=60)
+    return monitor_navigation_with_block_handling(client, max_total_time=300, max_continuous_block_time=60, wait_forever_on_block=wait_forever_on_block)
 
 class AGVController:
     """AGV控制器类，封装AGV的所有操作"""
@@ -1130,10 +1291,11 @@ def get_current_station(client):
         res = client.read_input_registers(address=INPUT_CURRENT_STATION, count=1)
         if not res.isError():
             raw_value = res.registers[0]
+            print(f"🏷️  [STATION] 当前读取到的站点号: {raw_value}")
             print(f"[DEBUG] AGV原始寄存器值: {raw_value}")
             
             # 定义有效站点列表
-            valid_stations = [4, 5, 6, 7]
+            valid_stations = [4, 5, 8, 9, 10]
             
             # 站点有效性检查
             if raw_value == 0:
@@ -1159,10 +1321,8 @@ def initialize_agv_to_station4(logger=None):
     
     根据当前位置执行不同的移动策略：
     - 站点4: 无需移动
-    - 站点5: 直接移动至站点4
-    - 站点6: 先移动至站点7，再移动至站点4  
-    - 站点7: 直接移动至站点4
-    - 其他站点: 直接尝试移动至站点4
+    - 其他有效站点(5,8,9,10): 直接移动至站点4
+    - 无效站点: 音频报警，等待人工处理
     
     Args:
         logger: 日志记录器（可选）
@@ -1190,7 +1350,8 @@ def initialize_agv_to_station4(logger=None):
         # 获取当前站点
         current_station = get_current_station(client)
         if current_station is None:
-            log("无法获取AGV当前站点，AGV可能处于未定位状态", "error")
+            log("⚠️  AGV当前不在任何预设站点（4,5,8,9,10）", "error")
+            log("AGV可能在站点0（未定位）或其他未知站点", "error")
             log("开始循环播放音频文件6提醒操作员", "warn")
             
             # 获取音频报警管理器
@@ -1213,45 +1374,14 @@ def initialize_agv_to_station4(logger=None):
             log("✅ AGV已在站点4，无需移动")
             return True
             
-        elif current_station == 5:
-            log("AGV在站点5，直接移动至站点4")
+        elif current_station in [5, 8, 9, 10]:
+            log(f"AGV在站点{current_station}，直接移动至站点4")
             success = move_agv_to_station(4, logger)
             if success:
-                log("✅ AGV成功从站点5移动到站点4")
+                log(f"✅ AGV成功从站点{current_station}移动到站点4")
                 return True
             else:
-                log("❌ AGV从站点5移动到站点4失败", "error")
-                return False
-                
-        elif current_station == 6:
-            log("AGV在站点6，需要先移动至站点7，再移动至站点4")
-            
-            # 第一步：移动到站点7
-            log("第一步：从站点6移动到站点7")
-            success = move_agv_to_station(7, logger)
-            if not success:
-                log("❌ AGV从站点6移动到站点7失败", "error")
-                return False
-            log("✅ AGV成功从站点6移动到站点7")
-            
-            # 第二步：移动到站点4
-            log("第二步：从站点7移动到站点4")
-            success = move_agv_to_station(4, logger)
-            if success:
-                log("✅ AGV成功从站点7移动到站点4，初始化完成")
-                return True
-            else:
-                log("❌ AGV从站点7移动到站点4失败", "error")
-                return False
-                
-        elif current_station == 7:
-            log("AGV在站点7，直接移动至站点4")
-            success = move_agv_to_station(4, logger)
-            if success:
-                log("✅ AGV成功从站点7移动到站点4")
-                return True
-            else:
-                log("❌ AGV从站点7移动到站点4失败", "error")
+                log(f"❌ AGV从站点{current_station}移动到站点4失败", "error")
                 return False
                 
         else:
@@ -1270,7 +1400,7 @@ def initialize_agv_to_station4(logger=None):
             )
             
             log(f"AGV在未识别的站点{current_station}，已启动音频报警", "error")
-            log("请操作员检查AGV位置，手动移动AGV到已知站点", "error")
+            log("请操作员检查AGV位置，手动移动AGV到有效站点(4,5,8,9,10)", "error")
             return False
                 
     except Exception as e:

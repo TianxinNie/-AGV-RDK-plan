@@ -131,6 +131,24 @@ def initialize_agv_system(logger):
         bool: True-初始化成功，False-初始化失败
     """
     logger.info("开始AGV初始化，确保AGV位于站点4...")
+    
+    # 先直接读取当前站点寄存器值
+    try:
+        global_conn = get_agv_connection()
+        client = global_conn.get_client()
+        if client:
+            logger.info("📡 正在读取AGV当前站点寄存器...")
+            res = client.read_input_registers(address=33, count=1)  # INPUT_CURRENT_STATION
+            if not res.isError():
+                raw_station = res.registers[0]
+                logger.info(f"🏷️  [MAIN] AGV当前站点寄存器值: {raw_station}")
+            else:
+                logger.error(f"读取站点寄存器失败: {res}")
+        else:
+            logger.error("无法获取AGV连接")
+    except Exception as e:
+        logger.error(f"读取站点信息异常: {e}")
+    
     try:
         init_success = simple_initialize_agv(logger)
         if init_success:
@@ -152,12 +170,11 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Flexiv机器人内存条处理自动化程序")
     parser.add_argument("--robot-sn", default="Rizon10-062283", help="机器人序列号")
-    #parser.add_argument("robot_sn",default="Rizon10-062283", help="机器人序列号")
     parser.add_argument("--work-num", type=int, default=1, help="工作编号，默认为1")
     parser.add_argument("--log-name", default="RobotLogger", help="日志记录器名称")
     parser.add_argument("--agv-ip", default="192.168.2.112", help="AGV的IP地址")
     parser.add_argument("--agv-port", type=int, default=502, help="AGV的Modbus端口")  
-    parser.add_argument("--work-station", type=int, default=4, help="工作站点ID")
+    parser.add_argument("--work-station", type=int, default=4, help="初始工作站点ID")
     parser.add_argument("--disable-agv", action="store_true", help="禁用AGV移动功能")
     parser.add_argument("--tool-num", type=int, default=1, help="工具编号")
     parser.add_argument("--check-mestick", action="store_true", help="启用内存条检查")
@@ -187,7 +204,7 @@ def main():
         agv_init_success = initialize_agv_system(logger)
         if not agv_init_success:
             logger.error("AGV初始化失败，程序终止")
-            logger.error("请确保AGV在有效站点(4、5、6、7)后重新运行程序")
+            logger.error("请确保AGV在有效站点(4,5,8,9,10)后重新运行程序")
             logger.info("音频报警将持续播放，按Ctrl+C可停止")
             
             # 等待用户手动停止，保持音频报警运行
@@ -199,7 +216,6 @@ def main():
                 logger.info("用户手动停止程序")
                 # 停止所有音频报警
                 try:
-                    from AGV import get_audio_alarm_manager
                     alarm_manager = get_audio_alarm_manager()
                     stopped_count = alarm_manager.stop_all_alarms()
                     if stopped_count > 0:
